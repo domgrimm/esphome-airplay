@@ -11,6 +11,8 @@ esp32:
   board: esp32dev
   framework:
     type: arduino
+    # For esp-idf builds, switch this to:
+    # type: esp-idf
 
 wifi:
   ssid: !secret wifi_ssid

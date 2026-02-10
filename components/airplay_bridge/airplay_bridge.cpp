@@ -31,8 +31,8 @@ void AirPlayBridge::add_target(media_player::MediaPlayer *player, const std::str
 float AirPlayBridge::get_setup_priority() const { return setup_priority::AFTER_WIFI; }
 
 void AirPlayBridge::setup() {
-#ifndef USE_ARDUINO
-  ESP_LOGE(TAG, "This component currently requires Arduino framework.");
+#if !defined(USE_ARDUINO) && !defined(USE_ESP_IDF)
+  ESP_LOGE(TAG, "This component currently requires Arduino or esp-idf framework.");
   return;
 #else
   this->setup_runtime_();
@@ -40,11 +40,9 @@ void AirPlayBridge::setup() {
 }
 
 void AirPlayBridge::loop() {
-#ifdef USE_ARDUINO
   for (auto &target : this->runtimes_) {
     this->handle_target_(target);
   }
-#endif
 }
 
 void AirPlayBridge::dump_config() {
@@ -57,7 +55,6 @@ void AirPlayBridge::dump_config() {
   }
 }
 
-#ifdef USE_ARDUINO
 void AirPlayBridge::setup_runtime_() {
   if (this->target_specs_.empty()) {
     ESP_LOGW(TAG, "No media player targets configured.");
@@ -75,9 +72,41 @@ void AirPlayBridge::setup_runtime_() {
 
     TargetRuntime runtime;
     runtime.spec = spec;
+#ifdef USE_ARDUINO
     runtime.server = std::make_unique<WiFiServer>(spec.port);
     runtime.server->begin();
     runtime.server->setNoDelay(true);
+#endif
+#ifdef USE_ESP_IDF
+    runtime.server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (runtime.server_fd < 0) {
+      ESP_LOGE(TAG, "socket() failed for target '%s' on port %u", spec.name.c_str(), spec.port);
+      continue;
+    }
+    int reuse = 1;
+    setsockopt(runtime.server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    sockaddr_in bind_addr{};
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bind_addr.sin_port = htons(spec.port);
+    if (bind(runtime.server_fd, reinterpret_cast<sockaddr *>(&bind_addr), sizeof(bind_addr)) < 0) {
+      ESP_LOGE(TAG, "bind() failed for target '%s' on port %u", spec.name.c_str(), spec.port);
+      close(runtime.server_fd);
+      runtime.server_fd = -1;
+      continue;
+    }
+    if (listen(runtime.server_fd, 1) < 0) {
+      ESP_LOGE(TAG, "listen() failed for target '%s' on port %u", spec.name.c_str(), spec.port);
+      close(runtime.server_fd);
+      runtime.server_fd = -1;
+      continue;
+    }
+    int flags = fcntl(runtime.server_fd, F_GETFL, 0);
+    if (flags >= 0) {
+      fcntl(runtime.server_fd, F_SETFL, flags | O_NONBLOCK);
+    }
+#endif
     this->runtimes_.push_back(std::move(runtime));
   }
 
@@ -173,6 +202,7 @@ void AirPlayBridge::advertise_target_(const TargetRuntime &target) {
 }
 
 void AirPlayBridge::handle_target_(TargetRuntime &target) {
+#ifdef USE_ARDUINO
   if (!target.client.connected()) {
     if (target.client) {
       target.client.stop();
@@ -201,6 +231,63 @@ void AirPlayBridge::handle_target_(TargetRuntime &target) {
   while (this->extract_next_request_(target, request)) {
     this->handle_request_(target, request);
   }
+#endif
+
+#ifdef USE_ESP_IDF
+  if (target.server_fd < 0) {
+    return;
+  }
+
+  if (target.client_fd < 0) {
+    sockaddr_in client_addr{};
+    socklen_t addr_len = sizeof(client_addr);
+    int accepted = accept(target.server_fd, reinterpret_cast<sockaddr *>(&client_addr), &addr_len);
+    if (accepted >= 0) {
+      int flags = fcntl(accepted, F_GETFL, 0);
+      if (flags >= 0) {
+        fcntl(accepted, F_SETFL, flags | O_NONBLOCK);
+      }
+      target.client_fd = accepted;
+      target.buffer.clear();
+      target.streaming = false;
+      ESP_LOGI(TAG, "Client connected to target '%s' on port %u", target.spec.name.c_str(), target.spec.port);
+    }
+  }
+
+  if (target.client_fd < 0) {
+    return;
+  }
+
+  char rx[1024];
+  while (true) {
+    const ssize_t read_len = recv(target.client_fd, rx, sizeof(rx), 0);
+    if (read_len > 0) {
+      target.buffer.append(rx, static_cast<size_t>(read_len));
+      continue;
+    }
+    if (read_len == 0) {
+      close(target.client_fd);
+      target.client_fd = -1;
+      target.buffer.clear();
+      target.streaming = false;
+      return;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      break;
+    }
+    ESP_LOGW(TAG, "Socket read failed for target '%s' (errno=%d)", target.spec.name.c_str(), errno);
+    close(target.client_fd);
+    target.client_fd = -1;
+    target.buffer.clear();
+    target.streaming = false;
+    return;
+  }
+
+  RtspRequest request;
+  while (this->extract_next_request_(target, request)) {
+    this->handle_request_(target, request);
+  }
+#endif
 }
 
 bool AirPlayBridge::extract_next_request_(TargetRuntime &target, RtspRequest &request) {
@@ -279,13 +366,13 @@ void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &re
 
   if (request.method == "OPTIONS") {
     headers["Public"] = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, SET_PARAMETER, GET_PARAMETER";
-    this->send_simple_ok_(target.client, cseq, headers);
+    this->send_simple_ok_(target, cseq, headers);
     return;
   }
 
   if (request.method == "ANNOUNCE") {
     target.announce_sdp = request.body;
-    this->send_simple_ok_(target.client, cseq, headers);
+    this->send_simple_ok_(target, cseq, headers);
     return;
   }
 
@@ -295,7 +382,7 @@ void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &re
     }
     headers["Session"] = target.session_id;
     headers["Transport"] = "RTP/AVP/TCP;unicast;interleaved=0-1;mode=record";
-    this->send_simple_ok_(target.client, cseq, headers);
+    this->send_simple_ok_(target, cseq, headers);
     return;
   }
 
@@ -303,14 +390,14 @@ void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &re
     headers["Session"] = target.session_id;
     headers["RTP-Info"] = "seq=0;rtptime=0";
     this->start_stream_(target);
-    this->send_simple_ok_(target.client, cseq, headers);
+    this->send_simple_ok_(target, cseq, headers);
     return;
   }
 
   if (request.method == "FLUSH") {
     headers["Session"] = target.session_id;
     this->stop_stream_(target);
-    this->send_simple_ok_(target.client, cseq, headers);
+    this->send_simple_ok_(target, cseq, headers);
     return;
   }
 
@@ -330,7 +417,7 @@ void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &re
         }
       }
     }
-    this->send_simple_ok_(target.client, cseq, headers);
+    this->send_simple_ok_(target, cseq, headers);
     return;
   }
 
@@ -339,22 +426,30 @@ void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &re
     headers["Session"] = target.session_id;
     const float db = target.last_volume <= 0.0001f ? -144.0f : 20.0f * log10f(target.last_volume);
     const std::string body = str_snprintf("volume: %.2f\r\n", db);
-    this->send_response_(target.client, 200, cseq, headers, body);
+    this->send_response_(target, 200, cseq, headers, body);
     return;
   }
 
   if (request.method == "TEARDOWN") {
     headers["Session"] = target.session_id;
     this->stop_stream_(target);
-    this->send_simple_ok_(target.client, cseq, headers);
+    this->send_simple_ok_(target, cseq, headers);
+#ifdef USE_ARDUINO
     target.client.stop();
+#endif
+#ifdef USE_ESP_IDF
+    if (target.client_fd >= 0) {
+      close(target.client_fd);
+      target.client_fd = -1;
+    }
+#endif
     return;
   }
 
-  this->send_response_(target.client, 501, cseq, headers);
+  this->send_response_(target, 501, cseq, headers);
 }
 
-void AirPlayBridge::send_response_(WiFiClient &client, int status_code, const std::string &cseq,
+void AirPlayBridge::send_response_(TargetRuntime &target, int status_code, const std::string &cseq,
                                    const std::map<std::string, std::string> &headers, const std::string &body) {
   std::string response = "RTSP/1.0 " + std::to_string(status_code) + " " + status_message_(status_code) + "\r\n";
   response += "CSeq: " + cseq + "\r\n";
@@ -366,12 +461,20 @@ void AirPlayBridge::send_response_(WiFiClient &client, int status_code, const st
   }
   response += "\r\n";
   response += body;
-  client.print(response.c_str());
+
+#ifdef USE_ARDUINO
+  target.client.print(response.c_str());
+#endif
+#ifdef USE_ESP_IDF
+  if (target.client_fd >= 0) {
+    (void) send(target.client_fd, response.data(), response.size(), 0);
+  }
+#endif
 }
 
-void AirPlayBridge::send_simple_ok_(WiFiClient &client, const std::string &cseq,
+void AirPlayBridge::send_simple_ok_(TargetRuntime &target, const std::string &cseq,
                                     const std::map<std::string, std::string> &headers) {
-  this->send_response_(client, 200, cseq, headers);
+  this->send_response_(target, 200, cseq, headers);
 }
 
 void AirPlayBridge::start_stream_(TargetRuntime &target) {
@@ -409,7 +512,17 @@ std::string AirPlayBridge::render_media_url_(const TargetRuntime &target) const 
   }
 
   std::string out = this->media_url_template_;
-  std::string ip = WiFi.localIP().toString().c_str();
+  std::string ip;
+  auto ip_addresses = network::get_ip_addresses();
+  for (const auto &candidate : ip_addresses) {
+    if (candidate.is_set()) {
+      ip = candidate.str();
+      break;
+    }
+  }
+  if (ip.empty()) {
+    ip = network::get_use_address();
+  }
 
   auto replace_all = [](std::string &source, const std::string &from, const std::string &to) {
     if (from.empty()) {
@@ -468,7 +581,5 @@ std::string AirPlayBridge::status_message_(int status_code) {
       return "OK";
   }
 }
-#endif
-
 }  // namespace airplay_bridge
 }  // namespace esphome

@@ -47,5 +47,8 @@ See `examples/basic.yaml`.
 
 ## Notes
 
-- Current implementation targets Arduino framework builds.
+- Current implementation supports:
+  - ESP32 Arduino builds
+  - ESP32 esp-idf builds
 - ESP32 has the best mDNS support for multiple service instances.
+- ESP8266 remains Arduino-only.
