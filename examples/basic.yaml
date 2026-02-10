@@ -1,0 +1,44 @@
+esphome:
+  name: airplay-bridge
+  friendly_name: AirPlay Bridge
+  external_components:
+    - source:
+        type: local
+        path: ../components
+      components: [airplay_bridge]
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+logger:
+
+api:
+
+ota:
+
+# Example media players. Replace these with your own media_player IDs.
+# A common setup is using homeassistant media_player proxies.
+media_player:
+  - platform: homeassistant
+    id: kitchen_player
+    entity_id: media_player.kitchen_speaker
+  - platform: homeassistant
+    id: office_player
+    entity_id: media_player.office_speaker
+
+airplay_bridge:
+  port_base: 7000
+  # Optional URL template for backends that expect a pull URL.
+  # Placeholder variables: {ip}, {port}, {target}, {session}
+  media_url_template: "http://{ip}:8080/airplay/{target}/{session}"
+  targets:
+    - media_player: kitchen_player
+      name: "Kitchen"
+    - media_player: office_player
+      name: "Office"
