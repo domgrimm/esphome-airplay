@@ -180,12 +180,14 @@ void AirPlayBridge::advertise_target_(const TargetRuntime &target) {
       {(char *) "txtvers", (char *) "1"},
       {(char *) "ch", (char *) "2"},
       {(char *) "cn", (char *) "0,1"},
+      {(char *) "da", (char *) "true"},
       {(char *) "et", (char *) "0"},
       {(char *) "md", (char *) "0,1,2"},
       {(char *) "pw", (char *) "false"},
       {(char *) "sr", (char *) "44100"},
       {(char *) "ss", (char *) "16"},
-      {(char *) "tp", (char *) "TCP"},
+      {(char *) "sv", (char *) "false"},
+      {(char *) "tp", (char *) "TCP,UDP"},
       {(char *) "vn", (char *) "65537"},
       {(char *) "vs", (char *) "130.14"},
       {(char *) "am", (char *) "ESPHome"},
@@ -384,8 +386,17 @@ void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &re
     }
     headers["Public"] = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET";
     headers["Server"] = "AirTunes/366.0";
+    headers["Connection"] = "close";
     this->send_simple_ok_(target, cseq, headers);
-    ESP_LOGD(TAG, "OPTIONS 200 OK sent (CSeq=%s)", cseq.c_str());
+    ESP_LOGD(TAG, "OPTIONS 200 OK sent (CSeq=%s), closing connection", cseq.c_str());
+#ifdef USE_ESP_IDF
+    if (target.client_fd >= 0) {
+      shutdown(target.client_fd, SHUT_RDWR);
+      close(target.client_fd);
+      target.client_fd = -1;
+      target.buffer.clear();
+    }
+#endif
     return;
   }
 
