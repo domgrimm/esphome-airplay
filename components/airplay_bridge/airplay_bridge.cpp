@@ -186,8 +186,8 @@ void AirPlayBridge::advertise_target_(const TargetRuntime &target) {
       {(char *) "sr", (char *) "44100"},
       {(char *) "ss", (char *) "16"},
       {(char *) "tp", (char *) "TCP"},
-      {(char *) "vn", (char *) "3"},
-      {(char *) "vs", (char *) "220.68"},
+      {(char *) "vn", (char *) "65537"},
+      {(char *) "vs", (char *) "130.14"},
       {(char *) "am", (char *) "ESPHome"},
       {(char *) "sf", (char *) "0x4"},
   };
@@ -246,6 +246,8 @@ void AirPlayBridge::handle_target_(TargetRuntime &target) {
     socklen_t addr_len = sizeof(client_addr);
     int accepted = accept(target.server_fd, reinterpret_cast<sockaddr *>(&client_addr), &addr_len);
     if (accepted >= 0) {
+      int on = 1;
+      setsockopt(accepted, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
       int flags = fcntl(accepted, F_GETFL, 0);
       if (flags >= 0) {
         fcntl(accepted, F_SETFL, flags | O_NONBLOCK);
@@ -383,6 +385,7 @@ void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &re
     headers["Public"] = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET";
     headers["Server"] = "AirTunes/366.0";
     this->send_simple_ok_(target, cseq, headers);
+    ESP_LOGD(TAG, "OPTIONS 200 OK sent (CSeq=%s)", cseq.c_str());
     return;
   }
 
@@ -490,17 +493,24 @@ void AirPlayBridge::send_response_(TargetRuntime &target, int status_code, const
 #endif
 #ifdef USE_ESP_IDF
   if (target.client_fd >= 0) {
+    int flags = fcntl(target.client_fd, F_GETFL, 0);
+    if (flags >= 0) {
+      fcntl(target.client_fd, F_SETFL, flags & ~O_NONBLOCK);
+    }
     size_t sent = 0;
     while (sent < response.size()) {
       const ssize_t n = send(target.client_fd, response.data() + sent, response.size() - sent, 0);
       if (n > 0) {
         sent += static_cast<size_t>(n);
-      } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        ESP_LOGW(TAG, "Send failed (errno=%d)", errno);
-        break;
       } else {
-        vTaskDelay(pdMS_TO_TICKS(1));
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+          ESP_LOGW(TAG, "Send failed (errno=%d)", errno);
+        }
+        break;
       }
+    }
+    if (flags >= 0) {
+      fcntl(target.client_fd, F_SETFL, flags);
     }
   }
 #endif
