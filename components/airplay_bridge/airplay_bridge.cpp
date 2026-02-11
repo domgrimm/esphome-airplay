@@ -370,6 +370,9 @@ bool AirPlayBridge::extract_next_request_(TargetRuntime &target, RtspRequest &re
 
 void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &request) {
   ESP_LOGD(TAG, "RTSP %s %s (target: %s)", request.method.c_str(), request.uri.c_str(), target.spec.name.c_str());
+  for (const auto &h : request.headers) {
+    ESP_LOGD(TAG, "  %s: %s", h.first.c_str(), h.second.c_str());
+  }
 
   const auto cseq_it = request.headers.find("cseq");
   const std::string cseq = cseq_it != request.headers.end() ? cseq_it->second : "1";
@@ -386,17 +389,8 @@ void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &re
     }
     headers["Public"] = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET";
     headers["Server"] = "AirTunes/366.0";
-    headers["Connection"] = "close";
     this->send_simple_ok_(target, cseq, headers);
-    ESP_LOGD(TAG, "OPTIONS 200 OK sent (CSeq=%s), closing connection", cseq.c_str());
-#ifdef USE_ESP_IDF
-    if (target.client_fd >= 0) {
-      shutdown(target.client_fd, SHUT_RDWR);
-      close(target.client_fd);
-      target.client_fd = -1;
-      target.buffer.clear();
-    }
-#endif
+    ESP_LOGD(TAG, "OPTIONS 200 OK sent (CSeq=%s)", cseq.c_str());
     return;
   }
 
@@ -498,6 +492,9 @@ void AirPlayBridge::send_response_(TargetRuntime &target, int status_code, const
   }
   response += "\r\n";
   response += body;
+
+  ESP_LOGD(TAG, "Response (%zu bytes): %.80s%s", response.size(), response.c_str(),
+           response.size() > 80 ? "..." : "");
 
 #ifdef USE_ARDUINO
   target.client.print(response.c_str());
