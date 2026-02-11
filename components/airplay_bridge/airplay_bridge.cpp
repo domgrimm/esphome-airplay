@@ -391,6 +391,12 @@ void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &re
     return;
   }
 
+  if (request.method == "POST" && (request.uri == "/fp-setup" || request.uri.find("/fp-setup") == 0)) {
+    headers["Content-Type"] = "application/octet-stream";
+    this->send_response_(target, 200, cseq, headers, "");
+    return;
+  }
+
   if (request.method == "ANNOUNCE") {
     target.announce_sdp = request.body;
     this->send_simple_ok_(target, cseq, headers);
