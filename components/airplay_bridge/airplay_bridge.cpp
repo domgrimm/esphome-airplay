@@ -386,17 +386,21 @@ void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &re
     if (ac_it != request.headers.end()) {
       ESP_LOGW(TAG, "OPTIONS with Apple-Challenge (et=0 should avoid this); client may require auth");
     }
+    std::string opt_resp = "RTSP/1.0 200 OK\r\n";
+    opt_resp += "CSeq: " + cseq + "\r\n";
+    opt_resp += "Public: ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET\r\n";
+    opt_resp += "Server: AirTunes/366.0\r\n";
+    opt_resp += "Audio-Jack-Status: connected; type=analog\r\n";
     auto dacp_it = request.headers.find("dacp-id");
     if (dacp_it != request.headers.end()) {
-      headers["DACP-ID"] = dacp_it->second;
+      opt_resp += "DACP-ID: " + dacp_it->second + "\r\n";
     }
     auto active_it = request.headers.find("active-remote");
     if (active_it != request.headers.end()) {
-      headers["Active-Remote"] = active_it->second;
+      opt_resp += "Active-Remote: " + active_it->second + "\r\n";
     }
-    headers["Public"] = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET";
-    headers["Server"] = "AirTunes/366.0";
-    this->send_simple_ok_(target, cseq, headers);
+    opt_resp += "\r\n";
+    this->send_raw_(target, opt_resp);
     ESP_LOGD(TAG, "OPTIONS 200 OK sent (CSeq=%s)", cseq.c_str());
     return;
   }
@@ -512,6 +516,35 @@ void AirPlayBridge::send_response_(TargetRuntime &target, int status_code, const
     size_t sent = 0;
     while (sent < response.size()) {
       const ssize_t n = send(target.client_fd, response.data() + sent, response.size() - sent, 0);
+      if (n > 0) {
+        sent += static_cast<size_t>(n);
+      } else {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+          ESP_LOGW(TAG, "Send failed (errno=%d)", errno);
+        }
+        break;
+      }
+    }
+    if (flags >= 0) {
+      fcntl(target.client_fd, F_SETFL, flags);
+    }
+  }
+#endif
+}
+
+void AirPlayBridge::send_raw_(TargetRuntime &target, const std::string &data) {
+#ifdef USE_ARDUINO
+  target.client.print(data.c_str());
+#endif
+#ifdef USE_ESP_IDF
+  if (target.client_fd >= 0) {
+    int flags = fcntl(target.client_fd, F_GETFL, 0);
+    if (flags >= 0) {
+      fcntl(target.client_fd, F_SETFL, flags & ~O_NONBLOCK);
+    }
+    size_t sent = 0;
+    while (sent < data.size()) {
+      const ssize_t n = send(target.client_fd, data.data() + sent, data.size() - sent, 0);
       if (n > 0) {
         sent += static_cast<size_t>(n);
       } else {

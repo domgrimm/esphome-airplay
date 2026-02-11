@@ -108,6 +108,7 @@ class AirPlayBridge : public Component {
   void handle_request_(TargetRuntime &target, const RtspRequest &request);
   void send_response_(TargetRuntime &target, int status_code, const std::string &cseq,
                       const std::map<std::string, std::string> &headers, const std::string &body = "");
+  void send_raw_(TargetRuntime &target, const std::string &data);
   void send_simple_ok_(TargetRuntime &target, const std::string &cseq,
                        const std::map<std::string, std::string> &headers = {});
   static std::string trim_(const std::string &value);
