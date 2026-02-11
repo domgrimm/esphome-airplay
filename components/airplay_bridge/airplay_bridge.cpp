@@ -386,9 +386,16 @@ void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &re
     if (ac_it != request.headers.end()) {
       ESP_LOGW(TAG, "OPTIONS with Apple-Challenge (et=0 should avoid this); client may require auth");
     }
+    auto dacp_it = request.headers.find("dacp-id");
+    if (dacp_it != request.headers.end()) {
+      headers["DACP-ID"] = dacp_it->second;
+    }
+    auto active_it = request.headers.find("active-remote");
+    if (active_it != request.headers.end()) {
+      headers["Active-Remote"] = active_it->second;
+    }
     headers["Public"] = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET";
     headers["Server"] = "AirTunes/366.0";
-    headers["Allow"] = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET";
     this->send_simple_ok_(target, cseq, headers);
     ESP_LOGD(TAG, "OPTIONS 200 OK sent (CSeq=%s)", cseq.c_str());
     return;
@@ -492,9 +499,6 @@ void AirPlayBridge::send_response_(TargetRuntime &target, int status_code, const
   }
   response += "\r\n";
   response += body;
-
-  ESP_LOGD(TAG, "Response (%zu bytes): %.80s%s", response.size(), response.c_str(),
-           response.size() > 80 ? "..." : "");
 
 #ifdef USE_ARDUINO
   target.client.print(response.c_str());
