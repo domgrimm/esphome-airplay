@@ -390,16 +390,7 @@ void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &re
     opt_resp += "CSeq: " + cseq + "\r\n";
     opt_resp += "Public: ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET\r\n";
     opt_resp += "Server: AirTunes/366.0\r\n";
-    opt_resp += "Audio-Jack-Status: connected; type=analog\r\n";
-    auto dacp_it = request.headers.find("dacp-id");
-    if (dacp_it != request.headers.end()) {
-      opt_resp += "DACP-ID: " + dacp_it->second + "\r\n";
-    }
-    auto active_it = request.headers.find("active-remote");
-    if (active_it != request.headers.end()) {
-      opt_resp += "Active-Remote: " + active_it->second + "\r\n";
-    }
-    opt_resp += "\r\n";
+    opt_resp += "Audio-Jack-Status: connected; type=analog\r\n\r\n";
     this->send_raw_(target, opt_resp);
     ESP_LOGD(TAG, "OPTIONS 200 OK sent (CSeq=%s)", cseq.c_str());
     return;
