@@ -18,6 +18,8 @@
 #endif
 
 #ifdef USE_ESP_IDF
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #if __has_include(<esp_audio_dec.h>)
 #define AIRPLAY_USE_ESP_AUDIO_CODEC 1
 #include <esp_audio_dec.h>
@@ -183,7 +185,7 @@ void AirPlayBridge::advertise_target_(const TargetRuntime &target) {
       {(char *) "pw", (char *) "false"},
       {(char *) "sr", (char *) "44100"},
       {(char *) "ss", (char *) "16"},
-      {(char *) "tp", (char *) "UDP"},
+      {(char *) "tp", (char *) "TCP"},
       {(char *) "vn", (char *) "3"},
       {(char *) "vs", (char *) "220.68"},
       {(char *) "am", (char *) "ESPHome"},
@@ -373,6 +375,8 @@ bool AirPlayBridge::extract_next_request_(TargetRuntime &target, RtspRequest &re
 }
 
 void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &request) {
+  ESP_LOGD(TAG, "RTSP %s %s (target: %s)", request.method.c_str(), request.uri.c_str(), target.spec.name.c_str());
+
   const auto cseq_it = request.headers.find("cseq");
   const std::string cseq = cseq_it != request.headers.end() ? cseq_it->second : "1";
 
@@ -406,6 +410,7 @@ void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &re
   if (request.method == "RECORD") {
     headers["Session"] = target.session_id;
     headers["RTP-Info"] = "seq=0;rtptime=0";
+    headers["Audio-Latency"] = "2205";
     this->start_stream_(target);
     this->send_simple_ok_(target, cseq, headers);
     return;
@@ -484,7 +489,18 @@ void AirPlayBridge::send_response_(TargetRuntime &target, int status_code, const
 #endif
 #ifdef USE_ESP_IDF
   if (target.client_fd >= 0) {
-    (void) send(target.client_fd, response.data(), response.size(), 0);
+    size_t sent = 0;
+    while (sent < response.size()) {
+      const ssize_t n = send(target.client_fd, response.data() + sent, response.size() - sent, 0);
+      if (n > 0) {
+        sent += static_cast<size_t>(n);
+      } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        ESP_LOGW(TAG, "Send failed (errno=%d)", errno);
+        break;
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(1));
+      }
+    }
   }
 #endif
 }
