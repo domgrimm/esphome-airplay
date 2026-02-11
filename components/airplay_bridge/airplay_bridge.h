@@ -31,13 +31,20 @@
 #include <vector>
 
 namespace esphome {
+namespace speaker {
+class Speaker;
+}  // namespace speaker
+}  // namespace esphome
+
+namespace esphome {
 namespace airplay_bridge {
 
 class AirPlayBridge : public Component {
  public:
   void set_port_base(uint16_t port_base) { this->port_base_ = port_base; }
   void set_media_url_template(const std::string &media_url_template) { this->media_url_template_ = media_url_template; }
-  void add_target(media_player::MediaPlayer *player, const std::string &name);
+  void set_output_sample_rate(uint32_t rate) { this->output_sample_rate_ = rate; }
+  void add_target(media_player::MediaPlayer *player, const std::string &name, esphome::Component *speaker_component);
 
   void setup() override;
   void loop() override;
@@ -47,6 +54,7 @@ class AirPlayBridge : public Component {
  protected:
   struct TargetSpec {
     media_player::MediaPlayer *player{nullptr};
+    esphome::speaker::Speaker *speaker{nullptr};
     std::string name;
     uint16_t port{0};
   };
@@ -73,12 +81,20 @@ class AirPlayBridge : public Component {
     std::string announce_sdp;
     float last_volume{0.5f};
     bool streaming{false};
+#ifdef USE_ESP_IDF
+    void *alac_decoder{nullptr};
+    std::string alac_config;
+    bool alac_initialized{false};
+    std::vector<uint8_t> pcm_buffer;
+    size_t resample_phase{0};
+#endif
   };
 
   std::vector<TargetSpec> target_specs_{};
   std::vector<TargetRuntime> runtimes_{};
   uint16_t port_base_{7000};
   std::string media_url_template_{};
+  uint32_t output_sample_rate_{16000};
   std::string device_id_colon_{};
   std::string device_id_raop_{};
   bool mdns_ready_{false};
@@ -101,6 +117,12 @@ class AirPlayBridge : public Component {
   void start_stream_(TargetRuntime &target);
   void stop_stream_(TargetRuntime &target);
   void apply_volume_(TargetRuntime &target, float volume);
+#ifdef USE_ESP_IDF
+  void process_rtp_audio_(TargetRuntime &target, const uint8_t *data, size_t len);
+  void process_interleaved_(TargetRuntime &target);
+  bool parse_alac_config_from_sdp_(TargetRuntime &target);
+  void resample_and_play_(TargetRuntime &target);
+#endif
 };
 
 }  // namespace airplay_bridge

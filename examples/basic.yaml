@@ -39,8 +39,12 @@ airplay_bridge:
   # Optional URL template for backends that expect a pull URL.
   # Placeholder variables: {ip}, {port}, {target}, {session}
   media_url_template: "http://{ip}:8080/airplay/{target}/{session}"
+  # For local playback (ALAC decode + speaker): use esp-idf, add idf_component.yml
+  # with esp_audio_codec, and add speaker + output_sample_rate to match your speaker:
+  # output_sample_rate: 16000
   targets:
     - media_player: kitchen_player
       name: "Kitchen"
     - media_player: office_player
       name: "Office"
+      # speaker: local_speaker  # optional: decodes AirPlay audio locally

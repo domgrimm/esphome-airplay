@@ -1,0 +1,6 @@
+## SPDX-License-Identifier: Apache-2.0
+## Required for ALAC decoding in local playback mode.
+## IDF Component Manager fetches this automatically; no project-level idf_component.yml needed.
+description: "AirPlay bridge - ALAC decoder"
+dependencies:
+  espressif/esp_audio_codec: "^2.0.3"

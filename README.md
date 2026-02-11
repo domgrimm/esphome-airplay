@@ -11,35 +11,55 @@ This repository contains an ESPHome `external_components` custom component that 
   - `FLUSH` / `TEARDOWN` -> `STOP`
   - `SET_PARAMETER volume` -> `set_volume()`
 - Optionally sets `media_url` via a template before issuing `PLAY`.
+- **Local playback**: When you add a `speaker` reference to a target, the component decodes AirPlay ALAC audio and feeds it directly to the speaker. Requires ESP32 with esp-idf framework and `esp_audio_codec` (see below).
 
-## Important limitations
+## Local playback setup
 
-AirPlay audio decoding/forwarding is not implemented in this first version. The component currently handles discovery/control/session setup and volume translation, but does not decode RAOP audio frames into local playback.
+For AirPlay audio decoding and local playback:
 
-In practice, this works best when paired with a backend that can consume session details (for example through your own relay pipeline) and expose a playable `media_url`, which you can inject with `media_url_template`.
+1. Use **esp-idf framework** (not Arduino)
+2. The component includes `idf_component.yml` with the `esp_audio_codec` dependency; the IDF Component Manager fetches it automatically during build. If the build fails to find `esp_audio_codec`, add a project-root `idf_component.yml` with `dependencies: espressif/esp_audio_codec: "^2.0.3"`.
+3. Add `speaker` to your target and match `output_sample_rate` to your speaker:
+
+```yaml
+airplay_bridge:
+  port_base: 7000
+  output_sample_rate: 16000
+  targets:
+    - media_player: {media_player_id}
+      speaker: {speaker_id}
+      name: "Speaker"
+```
 
 ## Directory layout
 
 - `components/airplay_bridge/__init__.py` - ESPHome config schema + codegen.
 - `components/airplay_bridge/airplay_bridge.h` - component declarations.
-- `components/airplay_bridge/airplay_bridge.cpp` - RTSP server, mDNS advertising, media_player control mapping.
+- `components/airplay_bridge/airplay_bridge.cpp` - RTSP server, mDNS, media_player control, ALAC decode.
 - `examples/basic.yaml` - reference ESPHome config.
 
 ## Usage
 
-1. Copy this repo (or just `components/airplay_bridge`) into your project.
-2. Add it as a local external component:
+1. Add repo as an external component:
 
 ```yaml
 external_components:
-  - source:
-      type: local
-      path: ./components
-    components: [airplay_bridge]
+  - source: github://domgrimm/esphome-airplay
+    components: ["airplay_bridge"]
 ```
 
-3. Configure `airplay_bridge` with at least one `media_player` target.
-4. Compile and flash with ESPHome.
+2. Configure `airplay_bridge` with at least one `media_player` target (add `speaker` for local playback):
+
+```yaml
+airplay_bridge:
+  port_base: 7000
+  targets:
+    - media_player: {media_player_id}
+      speaker: {speaker_id}  # optional, for local playback
+      name: "Speaker"
+```
+
+3. Compile and flash with ESPHome.
 
 ## Example config
 
@@ -48,7 +68,7 @@ See `examples/basic.yaml`.
 ## Notes
 
 - Current implementation supports:
-  - ESP32 Arduino builds
-  - ESP32 esp-idf builds
+  - ESP32 Arduino builds (control only, no local audio decode)
+  - ESP32 esp-idf builds (full local playback when speaker + esp_audio_codec)
 - ESP32 has the best mDNS support for multiple service instances.
 - ESP8266 remains Arduino-only.

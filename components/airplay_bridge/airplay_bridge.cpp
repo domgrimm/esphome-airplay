@@ -1,5 +1,6 @@
 #include "airplay_bridge.h"
 
+#include "esphome/components/speaker/speaker.h"
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "esphome/core/util.h"
@@ -16,14 +17,24 @@
 #include <esp_mac.h>
 #endif
 
+#ifdef USE_ESP_IDF
+#if __has_include(<esp_audio_dec.h>)
+#define AIRPLAY_USE_ESP_AUDIO_CODEC 1
+#include <esp_audio_dec.h>
+#include <esp_audio_types.h>
+#endif
+#endif
+
 namespace esphome {
 namespace airplay_bridge {
 
 static const char *const TAG = "airplay_bridge";
 
-void AirPlayBridge::add_target(media_player::MediaPlayer *player, const std::string &name) {
+void AirPlayBridge::add_target(media_player::MediaPlayer *player, const std::string &name,
+                               esphome::Component *speaker_component) {
   TargetSpec spec;
   spec.player = player;
+  spec.speaker = speaker_component ? reinterpret_cast<esphome::speaker::Speaker *>(speaker_component) : nullptr;
   spec.name = name;
   this->target_specs_.push_back(spec);
 }
@@ -293,11 +304,17 @@ void AirPlayBridge::handle_target_(TargetRuntime &target) {
 bool AirPlayBridge::extract_next_request_(TargetRuntime &target, RtspRequest &request) {
   // Interleaved RTP over TCP packets start with '$' and have a 2-byte length.
   while (target.buffer.size() >= 4 && target.buffer[0] == '$') {
+    const uint8_t channel = static_cast<uint8_t>(target.buffer[1]);
     const uint16_t payload_len = (static_cast<uint8_t>(target.buffer[2]) << 8) | static_cast<uint8_t>(target.buffer[3]);
     const size_t frame_len = static_cast<size_t>(4 + payload_len);
     if (target.buffer.size() < frame_len) {
       return false;
     }
+#ifdef USE_ESP_IDF
+    if (channel == 0 && target.spec.speaker && payload_len > 0) {
+      this->process_rtp_audio_(target, reinterpret_cast<const uint8_t *>(target.buffer.data() + 4), payload_len);
+    }
+#endif
     target.buffer.erase(0, frame_len);
   }
 
@@ -480,13 +497,30 @@ void AirPlayBridge::send_simple_ok_(TargetRuntime &target, const std::string &cs
 void AirPlayBridge::start_stream_(TargetRuntime &target) {
   target.streaming = true;
 
-  auto call = target.spec.player->make_call();
-  const std::string media_url = this->render_media_url_(target);
-  if (!media_url.empty()) {
-    call.set_media_url(media_url);
+#ifdef USE_ESP_IDF
+  if (target.spec.speaker) {
+    target.pcm_buffer.clear();
+    target.resample_phase = 0;
+    if (target.alac_decoder) {
+#if defined(AIRPLAY_USE_ESP_AUDIO_CODEC)
+      esp_audio_dec_reset(static_cast<esp_audio_dec_handle_t>(target.alac_decoder));
+#endif
+    } else {
+      this->parse_alac_config_from_sdp_(target);
+    }
+    target.spec.speaker->start();
   }
-  call.set_command(media_player::MEDIA_PLAYER_COMMAND_PLAY);
-  call.perform();
+#endif
+
+  if (!target.spec.speaker) {
+    auto call = target.spec.player->make_call();
+    const std::string media_url = this->render_media_url_(target);
+    if (!media_url.empty()) {
+      call.set_media_url(media_url);
+    }
+    call.set_command(media_player::MEDIA_PLAYER_COMMAND_PLAY);
+    call.perform();
+  }
 }
 
 void AirPlayBridge::stop_stream_(TargetRuntime &target) {
@@ -494,13 +528,26 @@ void AirPlayBridge::stop_stream_(TargetRuntime &target) {
     return;
   }
   target.streaming = false;
-  auto call = target.spec.player->make_call();
-  call.set_command(media_player::MEDIA_PLAYER_COMMAND_STOP);
-  call.perform();
+
+#ifdef USE_ESP_IDF
+  if (target.spec.speaker) {
+    this->resample_and_play_(target);
+    target.spec.speaker->finish();
+  }
+#endif
+
+  if (!target.spec.speaker) {
+    auto call = target.spec.player->make_call();
+    call.set_command(media_player::MEDIA_PLAYER_COMMAND_STOP);
+    call.perform();
+  }
 }
 
 void AirPlayBridge::apply_volume_(TargetRuntime &target, float volume) {
   target.last_volume = clamp(volume, 0.0f, 1.0f);
+  if (target.spec.speaker) {
+    target.spec.speaker->set_volume(target.last_volume);
+  }
   auto call = target.spec.player->make_call();
   call.set_volume(target.last_volume);
   call.perform();
@@ -581,5 +628,138 @@ std::string AirPlayBridge::status_message_(int status_code) {
       return "OK";
   }
 }
+
+#ifdef USE_ESP_IDF
+void AirPlayBridge::process_rtp_audio_(TargetRuntime &target, const uint8_t *data, size_t len) {
+#if defined(AIRPLAY_USE_ESP_AUDIO_CODEC)
+  if (!target.alac_decoder || len < 16) {
+    return;
+  }
+  const size_t rtp_header_len = 12;
+  const size_t au_header_len = 4;
+  if (len < rtp_header_len + au_header_len) {
+    return;
+  }
+  const uint8_t *payload = data + rtp_header_len;
+  const uint16_t au_count = (static_cast<uint16_t>(payload[0]) << 8) | payload[1];
+  const uint16_t au_size = (static_cast<uint16_t>(payload[2]) << 8) | payload[3];
+  const uint8_t *alac_frame = payload + au_header_len;
+  const size_t alac_len = len - rtp_header_len - au_header_len;
+  if (alac_len == 0) {
+    return;
+  }
+
+  esp_audio_dec_in_raw_t raw_in = {.buffer = const_cast<uint8_t *>(alac_frame),
+                                  .len = static_cast<uint32_t>(alac_len),
+                                  .consumed = 0,
+                                  .frame_recover = ESP_AUDIO_DEC_RECOVERY_NONE};
+  uint8_t pcm_out[8192];
+  esp_audio_dec_out_frame_t frame_out = {.buffer = pcm_out, .len = sizeof(pcm_out), .needed_size = 0, .decoded_size = 0};
+
+  esp_audio_err_t err = esp_audio_dec_process(static_cast<esp_audio_dec_handle_t>(target.alac_decoder), &raw_in, &frame_out);
+  if (err == ESP_AUDIO_ERR_OK && frame_out.decoded_size > 0) {
+    target.pcm_buffer.insert(target.pcm_buffer.end(), pcm_out, pcm_out + frame_out.decoded_size);
+    if (target.pcm_buffer.size() >= 4096) {
+      this->resample_and_play_(target);
+    }
+  }
+#else
+  (void) target;
+  (void) data;
+  (void) len;
+#endif
+}
+
+bool AirPlayBridge::parse_alac_config_from_sdp_(TargetRuntime &target) {
+#if defined(AIRPLAY_USE_ESP_AUDIO_CODEC)
+  if (target.announce_sdp.empty()) {
+    return false;
+  }
+  size_t pos = target.announce_sdp.find("a=fmtp:96");
+  if (pos == std::string::npos) {
+    return false;
+  }
+  pos = target.announce_sdp.find("config=", pos);
+  if (pos == std::string::npos) {
+    return false;
+  }
+  pos += 7;
+  size_t end = target.announce_sdp.find_first_of(" \r\n", pos);
+  std::string config_hex = end == std::string::npos ? target.announce_sdp.substr(pos) : target.announce_sdp.substr(pos, end - pos);
+  if (config_hex.size() < 24) {
+    return false;
+  }
+  target.alac_config.clear();
+  for (size_t i = 0; i + 2 <= config_hex.size(); i += 2) {
+    unsigned int byte;
+    if (sscanf(config_hex.substr(i, 2).c_str(), "%02x", &byte) == 1) {
+      target.alac_config.push_back(static_cast<uint8_t>(byte));
+    }
+  }
+  if (target.alac_config.size() < 24) {
+    return false;
+  }
+
+  esp_audio_dec_cfg_t cfg = {.type = ESP_AUDIO_TYPE_ALAC,
+                            .cfg = target.alac_config.data(),
+                            .cfg_sz = static_cast<uint32_t>(target.alac_config.size())};
+  esp_audio_dec_handle_t dec = nullptr;
+  if (esp_audio_dec_open(&cfg, &dec) != ESP_AUDIO_ERR_OK) {
+    ESP_LOGW(TAG, "Failed to open ALAC decoder");
+    return false;
+  }
+  target.alac_decoder = dec;
+  target.alac_initialized = true;
+  ESP_LOGI(TAG, "ALAC decoder initialized for target '%s'", target.spec.name.c_str());
+  return true;
+#else
+  (void) target;
+  ESP_LOGW(TAG, "ALAC decoding requires esp_audio_codec (add idf_component.yml dependency)");
+  return false;
+#endif
+}
+
+void AirPlayBridge::resample_and_play_(TargetRuntime &target) {
+  if (!target.spec.speaker || target.pcm_buffer.empty()) {
+    return;
+  }
+  const uint32_t in_rate = 44100;
+  const uint32_t out_rate = this->output_sample_rate_;
+  const size_t sample_size = 4;
+  const size_t in_samples = target.pcm_buffer.size() / sample_size;
+  if (in_samples == 0) {
+    return;
+  }
+
+  if (in_rate == out_rate) {
+    target.spec.speaker->play(target.pcm_buffer.data(), target.pcm_buffer.size());
+    target.pcm_buffer.clear();
+    return;
+  }
+
+  const size_t out_samples = static_cast<size_t>(static_cast<double>(in_samples) * out_rate / in_rate);
+  std::vector<uint8_t> out;
+  out.reserve(out_samples * sample_size);
+  const int16_t *in = reinterpret_cast<const int16_t *>(target.pcm_buffer.data());
+  for (size_t i = 0; i < out_samples; i++) {
+    const double src_idx = static_cast<double>(i) * in_rate / out_rate;
+    const size_t idx = static_cast<size_t>(src_idx);
+    if (idx + 1 < in_samples) {
+      const float t = static_cast<float>(src_idx - idx);
+      const int16_t l = static_cast<int16_t>(in[idx * 2] * (1.0f - t) + in[(idx + 1) * 2] * t);
+      const int16_t r = static_cast<int16_t>(in[idx * 2 + 1] * (1.0f - t) + in[(idx + 1) * 2 + 1] * t);
+      out.push_back(static_cast<uint8_t>(l & 0xFF));
+      out.push_back(static_cast<uint8_t>((l >> 8) & 0xFF));
+      out.push_back(static_cast<uint8_t>(r & 0xFF));
+      out.push_back(static_cast<uint8_t>((r >> 8) & 0xFF));
+    }
+  }
+  if (!out.empty()) {
+    target.spec.speaker->play(out.data(), out.size());
+  }
+  target.pcm_buffer.clear();
+}
+#endif
+
 }  // namespace airplay_bridge
 }  // namespace esphome
