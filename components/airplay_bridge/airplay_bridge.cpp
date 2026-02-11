@@ -180,7 +180,7 @@ void AirPlayBridge::advertise_target_(const TargetRuntime &target) {
       {(char *) "txtvers", (char *) "1"},
       {(char *) "ch", (char *) "2"},
       {(char *) "cn", (char *) "0,1"},
-      {(char *) "et", (char *) "0,1"},
+      {(char *) "et", (char *) "0"},
       {(char *) "md", (char *) "0,1,2"},
       {(char *) "pw", (char *) "false"},
       {(char *) "sr", (char *) "44100"},
@@ -376,7 +376,12 @@ void AirPlayBridge::handle_request_(TargetRuntime &target, const RtspRequest &re
   };
 
   if (request.method == "OPTIONS") {
-    headers["Public"] = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, SET_PARAMETER, GET_PARAMETER";
+    auto ac_it = request.headers.find("apple-challenge");
+    if (ac_it != request.headers.end()) {
+      ESP_LOGW(TAG, "OPTIONS with Apple-Challenge (et=0 should avoid this); client may require auth");
+    }
+    headers["Public"] = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET";
+    headers["Server"] = "AirTunes/366.0";
     this->send_simple_ok_(target, cseq, headers);
     return;
   }
