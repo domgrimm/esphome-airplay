@@ -195,15 +195,7 @@ void AirPlayBridge::advertise_target_(const TargetRuntime &target) {
   };
   mdns_service_add(raop_instance.c_str(), "_raop", "_tcp", target.spec.port, raop_txt, sizeof(raop_txt) / sizeof(raop_txt[0]));
 
-  mdns_txt_item_t airplay_txt[] = {
-      {(char *) "deviceid", (char *) this->device_id_colon_.c_str()},
-      {(char *) "features", (char *) "0x39f7"},
-      {(char *) "flags", (char *) "0x4"},
-      {(char *) "model", (char *) "AppleTV2,1"},
-      {(char *) "srcvers", (char *) "130.14"},
-  };
-  mdns_service_add(target.spec.name.c_str(), "_airplay", "_tcp", target.spec.port, airplay_txt,
-                   sizeof(airplay_txt) / sizeof(airplay_txt[0]));
+  /* RAOP-only: _airplay with minimal features caused discovery issues. */
 #endif
 #ifdef USE_ESP8266
   // ESP8266 Arduino mDNS does not expose service instances; only one raop entry is practical.
